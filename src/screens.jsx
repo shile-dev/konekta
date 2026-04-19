@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Send, ArrowDownToLine, Clock, Bluetooth, Sparkles,
   Plus, ArrowUpRight, ChevronLeft, WifiOff, Shield, Zap, CheckCircle, Bot,
@@ -19,21 +19,38 @@ function SignalIcon({ size = 11, color = "currentColor" }) {
 
 // ─── HOME SCREEN ─────────────────────────────────────────────────────────────
 export function HomeScreen({ balance, transactions, beneficiaries, onNavigate, onUseBeneficiary, onAICommand, onOpenBluetooth }) {
-  const [aiText,    setAiText]    = useState("");
-  const [aiResp,    setAiResp]    = useState(null);
-  const [aiLoading, setAiLoading] = useState(false);
+  const [aiText,        setAiText]        = useState("");
+  const [messages,      setMessages]      = useState([]);
+  const [claudeHistory, setClaudeHistory] = useState([]);
+  const [aiLoading,     setAiLoading]     = useState(false);
+  const chatBoxRef = useRef(null);
+
+  useEffect(() => {
+    const el = chatBoxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, aiLoading]);
 
   async function runAI() {
     const text = aiText.trim();
     if (!text) return;
-    setAiLoading(true); setAiResp(null); setAiText("");
-    const r = await askKonekta(text, balance, transactions);
+    setAiText("");
+    setMessages((prev) => [...prev, { role: "user", text }]);
+    setAiLoading(true);
+
+    const r = await askKonekta(text, balance, transactions, claudeHistory);
     setAiLoading(false);
-    if      (r.action === "send")      { setAiResp({ type: "info", text: r.message }); onAICommand(r); }
-    else if (r.action === "balance")   { setAiResp({ type: "success", text: r.message.replace("[BAL]", balance.toLocaleString("en-NG", { minimumFractionDigits: 2 })) }); }
-    else if (r.action === "navigate")  { setAiResp({ type: "info", text: r.message }); setTimeout(() => onNavigate(r.destination), 700); }
-    else if (r.action === "bluetooth") { setAiResp({ type: "info", text: r.message }); setTimeout(() => onOpenBluetooth(), 500); }
-    else                               { setAiResp({ type: r.action === "summary" ? "success" : "info", text: r.message }); }
+
+    const type = (r.action === "balance" || r.action === "summary") ? "success" : "info";
+    setMessages((prev) => [...prev, { role: "assistant", text: r.message, type }]);
+    setClaudeHistory((prev) => [
+      ...prev,
+      { role: "user",      content: text },
+      { role: "assistant", content: JSON.stringify(r) },
+    ].slice(-10));
+
+    if      (r.action === "send")      onAICommand(r);
+    else if (r.action === "navigate")  setTimeout(() => onNavigate(r.destination), 700);
+    else if (r.action === "bluetooth") setTimeout(() => onOpenBluetooth(), 500);
   }
 
   return (
@@ -118,17 +135,51 @@ export function HomeScreen({ balance, transactions, beneficiaries, onNavigate, o
       <div style={{ padding: "20px 20px 0" }}>
         {/* ── AI BOX ── */}
         <div style={{ ...card({ marginBottom: 22, border: `1.5px solid ${T.border}` }) }}>
+          {/* Header */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
             <Bot size={16} color={T.P} strokeWidth={1.8} />
             <span style={{ fontSize: 11, fontWeight: 700, color: T.P, textTransform: "uppercase", letterSpacing: 0.6 }}>Konekta AI</span>
-            <div style={{ width: 6, height: 6, borderRadius: "50%", background: T.G, marginLeft: "auto", animation: "gpulse 2s infinite" }} />
+            {messages.length > 0 && (
+              <button onClick={() => { setMessages([]); setClaudeHistory([]); }}
+                style={{ marginLeft: "auto", fontSize: 10, color: T.text3, background: "none", border: "none", cursor: "pointer", fontFamily: FONT }}>
+                Clear
+              </button>
+            )}
+            {messages.length === 0 && (
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: T.G, marginLeft: "auto", animation: "gpulse 2s infinite" }} />
+            )}
           </div>
+
+          {/* Chat history */}
+          {messages.length > 0 && (
+            <div ref={chatBoxRef} style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              {messages.map((msg, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                  <div style={{
+                    maxWidth: "80%", padding: "8px 12px", fontSize: 13, fontWeight: 500, lineHeight: 1.5,
+                    borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+                    background: msg.role === "user" ? `linear-gradient(135deg,${T.P},${T.Plight})` : msg.type === "success" ? T.Grpale : T.Psoft,
+                    color: msg.role === "user" ? "#fff" : msg.type === "success" ? T.Gr : T.P,
+                  }}>
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+              {aiLoading && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 12px" }}>
+                  {[0, 1, 2].map((i) => <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: T.P, opacity: 0.4, animation: `bounce 1.2s ${i * 0.2}s infinite` }} />)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Input row */}
           <div style={{ display: "flex", gap: 8 }}>
             <input
               value={aiText}
               onChange={(e) => setAiText(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && runAI()}
-              placeholder='Try: "Send 2k to Ope" · "Wetin I don spend?"'
+              placeholder={messages.length === 0 ? 'Try: "Send 2k to Ope" · "Wetin I don spend?"' : "Ask a follow-up..."}
               style={{ ...inputSt({ flex: 1, fontSize: 13 }) }}
             />
             <button onClick={runAI} disabled={aiLoading}
@@ -138,17 +189,6 @@ export function HomeScreen({ balance, transactions, beneficiaries, onNavigate, o
                 : <Sparkles size={17} color="#fff" />}
             </button>
           </div>
-          {aiLoading && (
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10 }}>
-              {[0, 1, 2].map((i) => <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: T.P, opacity: 0.4, animation: `bounce 1.2s ${i * 0.2}s infinite` }} />)}
-              <span style={{ fontSize: 11, color: T.text3, marginLeft: 4 }}>Thinking...</span>
-            </div>
-          )}
-          {aiResp && (
-            <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 10, background: aiResp.type === "success" ? T.Grpale : T.Psoft, fontSize: 13, color: aiResp.type === "success" ? T.Gr : T.P, fontWeight: 500, lineHeight: 1.5 }}>
-              {aiResp.text}
-            </div>
-          )}
         </div>
 
         {/* ── BENEFICIARIES ── */}

@@ -74,55 +74,78 @@ export const saveTx    = (v) => localStorage.setItem(K.tx,    JSON.stringify(v))
 export const saveBenes = (v) => localStorage.setItem(K.benes, JSON.stringify(v));
 
 // ─── CLAUDE API ──────────────────────────────────────────────────────────────
-const SYS = `You are Konekta's offline-first AI wallet assistant for Nigerian users.
-Respond in JSON only. No extra text.
+const SYS = `You are Konekta, a friendly AI wallet assistant for Nigerian users. You understand English and Nigerian Pidgin.
+Respond in JSON only — no extra text before or after.
+Mirror the user's language: if they write Pidgin, reply in Pidgin; if English, reply in English.
+Always use exact figures from the context provided.
 
-SEND ("Send 2k to Ope", "Abeg send 500 give Shile"):
-{"action":"send","amount":2000,"recipient":"Ope","message":"Transferring ₦2,000 to Ope..."}
-Convert: 2k=2000, 1.5k=1500.
+BALANCE — user wants to know their current wallet balance:
+Triggers: "What's my balance", "How much I get", "Wetin remain", "Check my balance", "How much do I have"
+{"action":"balance","message":"<natural reply stating the exact current balance>"}
 
-BALANCE ("How much I get?", "Wetin remain?"):
-{"action":"balance","message":"Your balance is ₦[BAL]."}
+SUMMARY — user wants to know how much they have spent, sent, or received (overall or for a time period):
+Triggers: "How much have I spent today", "How much have I spent", "Wetin I don spend", "How much I don send", "What did I spend this week", "My spending", "Show my expenses", "How much I don use"
+{"action":"summary","message":"<friendly 1-2 sentence summary — mention today's spending if asked about today, overall totals otherwise. Include both sent and received if relevant.>"}
 
-SUMMARY ("How much I don spend?", "Wetin I don send?"):
-{"action":"summary","message":"[friendly summary]"}
+SEND — user wants to transfer money:
+Triggers: "Send 2k to Ope", "Abeg send 500 give Shile", "Transfer 1k to Destiny"
+Convert shorthand: 2k=2000, 1.5k=1500, 500=500.
+{"action":"send","amount":2000,"recipient":"Ope","message":"<natural confirmation of the transfer>"}
 
-RECEIVE ("Receive money", "I wan collect"):
-{"action":"navigate","destination":"receive","message":"Opening receive screen 📥"}
+RECEIVE — user wants to receive money:
+Triggers: "Receive money", "I wan collect", "Someone wan send me money"
+{"action":"navigate","destination":"receive","message":"<natural reply opening receive screen>"}
 
-HISTORY: {"action":"navigate","destination":"history","message":"Here is your history"}
+HISTORY — user wants to see transaction history:
+Triggers: "Show my history", "My transactions", "What have I been doing"
+{"action":"navigate","destination":"history","message":"<natural reply opening history>"}
 
-BLUETOOTH ("Connect BT", "Scan nearby"): {"action":"bluetooth","message":"Opening Bluetooth scanner"}
+BLUETOOTH — user wants to connect via Bluetooth:
+Triggers: "Connect BT", "Scan nearby", "Bluetooth transfer"
+{"action":"bluetooth","message":"<natural reply opening Bluetooth scanner>"}
 
-UNCLEAR: {"action":"clarify","message":"[clarifying question in user's language]"}`;
+UNCLEAR — intent cannot be determined:
+{"action":"clarify","message":"<short, friendly clarifying question in the user's language>"}`;
 
-export async function askKonekta(text, balance, transactions) {
-  const ctx = `Balance: ₦${balance}. Transactions: ${JSON.stringify(transactions.slice(0, 8))}`;
+export async function askKonekta(text, balance, transactions, history = []) {
+  const today         = new Date().toDateString();
+  const fmt2          = (n) => "₦" + n.toLocaleString("en-NG", { minimumFractionDigits: 2 });
+  const totalSpent    = transactions.filter((t) => t.type === "debit") .reduce((s, t) => s + t.amount, 0);
+  const totalReceived = transactions.filter((t) => t.type === "credit").reduce((s, t) => s + t.amount, 0);
+  const todaySpent    = transactions.filter((t) => t.type === "debit"   && new Date(t.date).toDateString() === today).reduce((s, t) => s + t.amount, 0);
+  const todayReceived = transactions.filter((t) => t.type === "credit"  && new Date(t.date).toDateString() === today).reduce((s, t) => s + t.amount, 0);
+  const ctx = `Today: ${today}. Current balance: ${fmt2(balance)}. Today spent: ${fmt2(todaySpent)}. Today received: ${fmt2(todayReceived)}. All-time sent: ${fmt2(totalSpent)}. All-time received: ${fmt2(totalReceived)}. Recent transactions: ${JSON.stringify(transactions.slice(0, 8))}`;
   try {
     const res = await fetch("/api/claude", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: 300,
         system: SYS,
-        messages: [{ role: "user", content: text + "\n\n" + ctx }],
+        messages: [...history, { role: "user", content: text + "\n\n" + ctx }],
       }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `API error ${res.status}`);
+    }
     const data = await res.json();
-    const raw = data.content?.[0]?.text || "{}";
-    try { return JSON.parse(raw); }
-    catch { return { action: "clarify", message: raw }; }
-  } catch {
+    const raw   = data.content?.[0]?.text?.trim() || "{}";
+    const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    try { return JSON.parse(clean); }
+    catch { return { action: "clarify", message: clean }; }
+  } catch (e) {
+    console.error("[Konekta AI]", e.message);
     // Offline fallback
     const lo = text.toLowerCase();
-    const m = lo.match(/send\s+(\d+\.?\d*k?)\s+(?:to|give)\s+(\w+)/i);
+    const m  = lo.match(/send\s+(\d+\.?\d*k?)\s+(?:to|give)\s+(\w+)/i);
     if (m) {
       const a = m[1].toLowerCase().includes("k") ? parseFloat(m[1]) * 1000 : parseFloat(m[1]);
-      return { action: "send", amount: a, recipient: m[2], message: `Offline: sending ${fmt(a)} to ${m[2]}` };
+      return { action: "send", amount: a, recipient: m[2], message: `Offline: sending ${fmt2(a)} to ${m[2]}` };
     }
-    if (lo.includes("balance") || lo.includes("how much") || lo.includes("wetin remain"))
-      return { action: "balance", message: `Your balance is ₦${balance.toLocaleString("en-NG", { minimumFractionDigits: 2 })}` };
-    return { action: "clarify", message: "No network. Try: 'Send 2k to Ope' or 'Check balance'" };
+    if (lo.includes("balance") || lo.includes("wetin remain"))
+      return { action: "balance", message: `Your balance is ${fmt2(balance)}` };
+    return { action: "clarify", message: `AI unavailable: ${e.message}` };
   }
 }
